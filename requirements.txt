@@ -39,3 +39,4 @@ tqdm==4.66.4
 # Optional (Recommended)
 # -----------------------------
 matplotlib==3.8.4
+pylatexenc

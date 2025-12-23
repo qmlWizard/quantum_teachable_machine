@@ -47,7 +47,7 @@ def angle_encoding(x, scaling: float = 1.0, num_qubits: int = 2, rotation: str =
     Returns:
         QuantumCircuit: A quantum circuit with the embedding pattern applied.
     """
-    if num_qubits <= 0 or num_qubits < len(x)
+    if num_qubits <= 0 or num_qubits < len(x):
         raise ValueError("Number of qubits must be positive and at least equal to the length of input vector x.")
 
     # Generate rotation map: if multiple rotations are specified, use them in sequence
