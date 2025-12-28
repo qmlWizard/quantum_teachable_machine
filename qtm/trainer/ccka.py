@@ -66,7 +66,6 @@ class CentroidKernelTrainer:
         # Centroids
         # ----------------------------
         feature_dim = X.shape[1]
-
         self._centroids = np.zeros((self._num_classes, feature_dim))
         self._subcentroids = np.zeros(
             (self._num_classes * num_subcentroids, feature_dim)
@@ -92,7 +91,6 @@ class CentroidKernelTrainer:
             self._subcentroid_optm = ParameterShiftOptimizer(lr=self._lr_subcentroid)
         else:
             raise ValueError(f"Unknown optimizer: {optimizer}")
-
         self._weights = np.random.randn(self._model.parameter_shape())
 
         # ----------------------------
@@ -101,23 +99,19 @@ class CentroidKernelTrainer:
         n = X.shape[0]
         train_end = int(n * training_split)
         val_size = int(train_end * validation_split)
-
         self.X_train = X[:train_end - val_size]
         self.y_train = y[:train_end - val_size]
         self.X_val = X[train_end - val_size:train_end]
         self.y_val = y[train_end - val_size:train_end]
         self.X_test = X[train_end:]
         self.y_test = y[train_end:]
-
         self._init_centroids(self.X_train, self.y_train)
 
     def _init_centroids(self, X, y):
         for idx, cls in enumerate(self._classes):
             class_data = X[y == cls]
-
             self._centroids[idx] = class_data.mean(axis=0)
             self._centroids_cls[idx] = cls
-
             splits = np.array_split(class_data, self._num_subcentroids)
             for s_idx, split in enumerate(splits):
                 flat_idx = idx * self._num_subcentroids + s_idx
@@ -127,10 +121,8 @@ class CentroidKernelTrainer:
     def _centroid_kta(self, K, y):
         K = K.reshape(-1)
         y = y.reshape(-1)
-
         if K.shape != y.shape:
             raise ValueError("Kernel and labels must have same shape")
-
         num = np.dot(K, y)
         den = np.linalg.norm(K) * np.linalg.norm(y)
         return num / den
@@ -228,51 +220,30 @@ class CentroidKernelTrainer:
         self.training_time = time.time() - start
 
     def evaluate(self):
-
         evaluation = {}
 
         # ---- Train kernel ----
         Xtr = self.X_train
-        K_train = self._model.execute(
-            np.repeat(Xtr, len(Xtr), axis=0),
-            np.tile(Xtr, (len(Xtr), 1)),
-            self._weights
-        )
-
+        K_train = self._model.execute(np.repeat(Xtr, len(Xtr), axis=0), np.tile(Xtr, (len(Xtr), 1)), self._weights)
         evaluation["kernel_alignment"] = self._kta(K_train, self.y_train)
         evaluation.update(self._psd(K_train))
         evaluation["condition_number"] = self._kcn(K_train)
         evaluation.update(self._krm(K_train))
-
         clf = SVC(kernel="precomputed", max_iter=10000)
         clf.fit(K_train, self.y_train)
 
         # ---- Test kernel ----
-        K_test = self._model.execute(
-            np.repeat(self.X_test, len(self.X_train), axis=0),
-            np.tile(self.X_train, (len(self.X_test), 1)),
-            self._weights
-        )
-
+        K_test = self._model.execute(np.repeat(self.X_test, len(self.X_train), axis=0), np.tile(self.X_train, (len(self.X_test), 1)), self._weights)
         preds = clf.predict(K_test)
-
         evaluation["accuracy"] = accuracy_score(self.y_test, preds)
-        evaluation["precision"] = precision_score(
-            self.y_test, preds, average="macro"
-        )
-        evaluation["recall"] = recall_score(
-            self.y_test, preds, average="macro"
-        )
-        evaluation["f1"] = f1_score(
-            self.y_test, preds, average="macro"
-        )
+        evaluation["precision"] = precision_score(self.y_test, preds, average="macro")
+        evaluation["recall"] = recall_score(self.y_test, preds, average="macro")
+        evaluation["f1"] = f1_score(self.y_test, preds, average="macro")
 
         # ---- SVM geometry ----
         sv = clf.support_
         support_kernel = K_train[np.ix_(sv, sv)]
-        evaluation["svm_margin"] = self._svm_margin(
-            clf.dual_coef_, clf._y[sv], support_kernel
-        )
+        evaluation["svm_margin"] = self._svm_margin(clf.dual_coef_, clf._y[sv], support_kernel)
         evaluation["num_support_vectors"] = len(sv)
 
         return evaluation
