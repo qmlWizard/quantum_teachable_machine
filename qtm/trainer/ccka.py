@@ -55,6 +55,7 @@ class CentroidKernelTrainer:
         self._lambda_kao = lambda_kao
         self._lambda_co = lambda_co
         self._validation_split = validation_split
+        self.num_qubits = model.num_qubits
 
         # ----------------------------
         # Classes 
@@ -91,7 +92,16 @@ class CentroidKernelTrainer:
             self._subcentroid_optm = ParameterShiftOptimizer(lr=self._lr_subcentroid)
         else:
             raise ValueError(f"Unknown optimizer: {optimizer}")
-        self._weights = np.random.randn(self._model.parameter_shape())
+
+        param_shape = self._model._kernel_circuit.parameter_shape()
+
+        reps = param_shape["reps"]
+        rot_shape = param_shape["rotation_weights_shape"]
+        ent_shape = param_shape["entangling_weights_shape"]
+
+        rot_dim = rot_shape[0]
+        ent_dim = ent_shape[0]
+        self._weights = np.random.randn(reps, rot_dim + ent_dim)
 
         # ----------------------------
         # Data split
@@ -106,6 +116,8 @@ class CentroidKernelTrainer:
         self.X_test = X[train_end:]
         self.y_test = y[train_end:]
         self._init_centroids(self.X_train, self.y_train)
+    
+
 
     def _init_centroids(self, X, y):
         for idx, cls in enumerate(self._classes):
@@ -179,71 +191,147 @@ class CentroidKernelTrainer:
         return float(1.0 / np.sqrt(w_norm_sq))
 
     def train(self):
+        history = {}
         start = time.time()
+        param_history = []
+        centroids_history = []
+        subcentroids_history = []
+        val_kta_history = []
+        val_accuracy_history = []
+        val_precision_history = []
+        val_recall_history = []
+        val_f1_history = []
 
+        print('-----------------------------------------------------------')
         for _ in range(self._outer_steps):
+            print(f"=== Outer Step {_ + 1} / {self._outer_steps} ===")
+            # ---- Train kernel ----
             for c_idx, cls in enumerate(self._classes):
 
-                start_idx = c_idx * self._num_subcentroids
-                end_idx = start_idx + self._num_subcentroids
-
                 centroid = self._centroids[c_idx]
-                subc = self._subcentroids[start_idx:end_idx]
-                labels = np.where(
-                    self._subcentroids_cls[start_idx:end_idx] == cls,
-                    1, -1
-                )
+                subc = self._subcentroids   
+                labels = np.where(self._subcentroids_cls == cls, 1, -1)
 
+                print(f"Class {cls}: Parameter optimization over {len(subc)} subcentroids")
                 # ---- parameter optimization ----
                 for _ in range(self._inner_steps):
                     x0 = np.repeat(centroid[None, :], len(subc), axis=0)
-                    K = self._model.execute(x0, subc, self._weights)
-
+                    K = self._model.execute(x0, subc, self._weights)[0]
+                    per_rep_dim = self.num_qubits + (self.num_qubits - 1)
                     loss = self._loss_kao(K, labels, self._weights)
                     self._weights = self._param_optm.step(
-                        loss, self._model.parameters
+                        self._model, self._loss_kao, x0, subc, labels, self._weights, per_rep_dim    
                     )
-
+                    param_history.append(self._weights.copy())
+                    centroids_history.append(self._centroids.copy())
+                    subcentroids_history.append(self._subcentroids.copy())
+                cls = -cls
+                print(f"Class {cls}: Centroid optimization over {len(subc)} subcentroids")
                 # ---- centroid optimization ----
                 for _ in range(self._inner_steps):
                     x0 = np.repeat(centroid[None, :], len(subc), axis=0)
-                    K = self._model.execute(x0, subc, self._weights)
-
-                    loss = self._loss_co(K, labels, centroid)
+                    K = self._model.execute(x0, subc, self._weights)[0]
+                    per_rep_dim = None
+                    loss = self._loss_co(K, labels, centroid + subc)
                     centroid, subc = self._centroid_optm.step(
-                        loss, centroid, subc
+                         self._model, self._loss_co, x0, subc, labels, self._weights, per_rep_dim, centroid
                     )
 
                     self._centroids[c_idx] = centroid
-                    self._subcentroids[start_idx:end_idx] = subc
+                    self._subcentroids = subc
+
+                    param_history.append(self._weights.copy())
+                    centroids_history.append(self._centroids.copy())
+                    subcentroids_history.append(self._subcentroids.copy())
+                print('-----------------------------------------------------------')
+
+            if self._validation_split > 0.0:
+                Xtr = self.X_train
+                ytr = self.y_train
+                K_train = self._model.execute(Xtr, Xtr, self._weights)
+                clf = SVC(kernel="precomputed", max_iter=10000)
+                clf.fit(K_train, ytr)
+                K_val = self._model.execute(self.X_val, Xtr, self._weights)
+                preds = clf.predict(K_val)
+                val_accuracy = accuracy_score(self.y_val, preds)
+                val_precision = precision_score(self.y_val, preds, average="macro")
+                val_recall = recall_score(self.y_val, preds, average="macro")
+                val_f1 = f1_score(self.y_val, preds, average="macro")
+                val_kta = self._kta(K_train, self.y_train)
+
+                val_kta_history.append(val_kta)
+                val_accuracy_history.append(val_accuracy)
+                val_precision_history.append(val_precision)
+                val_recall_history.append(val_recall)
+                val_f1_history.append(val_f1)
+
+                self.print_metrics_box(val_kta, val_accuracy, val_precision, val_recall, val_f1)
+
+                print('-----------------------------------------------------------')
 
         self.training_time = time.time() - start
+
+        history["param_history"] = [param_history]
+        history["centroids_history"] = [centroids_history]
+        history["subcentroids_history"] = [subcentroids_history]
+        history["val_kta_history"] = [val_kta_history]
+        history["val_accuracy_history"] = [val_accuracy_history]
+        history["val_precision_history"] = [val_precision_history]
+        history["val_recall_history"] = [val_recall_history]
+        history["val_f1_history"] = [val_f1_history]
+        history["training_time"] = [self.training_time]
+
+        return history
 
     def evaluate(self):
         evaluation = {}
 
         # ---- Train kernel ----
         Xtr = self.X_train
-        K_train = self._model.execute(np.repeat(Xtr, len(Xtr), axis=0), np.tile(Xtr, (len(Xtr), 1)), self._weights)
+        K_train = self._model.execute(Xtr, Xtr, self._weights)
         evaluation["kernel_alignment"] = self._kta(K_train, self.y_train)
+        print("Kernel alignment (train): ", evaluation["kernel_alignment"])
         evaluation.update(self._psd(K_train))
         evaluation["condition_number"] = self._kcn(K_train)
+        print("Condition number (train): ", evaluation["condition_number"])
         evaluation.update(self._krm(K_train))
         clf = SVC(kernel="precomputed", max_iter=10000)
         clf.fit(K_train, self.y_train)
 
         # ---- Test kernel ----
-        K_test = self._model.execute(np.repeat(self.X_test, len(self.X_train), axis=0), np.tile(self.X_train, (len(self.X_test), 1)), self._weights)
+        K_test = self._model.execute(self.X_test, Xtr, self._weights)
         preds = clf.predict(K_test)
         evaluation["accuracy"] = accuracy_score(self.y_test, preds)
+        print("Accuracy (test): ", evaluation["accuracy"])
         evaluation["precision"] = precision_score(self.y_test, preds, average="macro")
+        print("Precision (test): ", evaluation["precision"])
         evaluation["recall"] = recall_score(self.y_test, preds, average="macro")
+        print("Recall (test): ", evaluation["recall"])
         evaluation["f1"] = f1_score(self.y_test, preds, average="macro")
+        print("F1-score (test): ", evaluation["f1"])
 
         # ---- SVM geometry ----
         sv = clf.support_
         support_kernel = K_train[np.ix_(sv, sv)]
-        evaluation["svm_margin"] = self._svm_margin(clf.dual_coef_, clf._y[sv], support_kernel)
+        evaluation["svm_margin"] = self._svm_margin(clf.dual_coef_, self.y_train[sv], support_kernel)
+        print("SVM Margin: ", evaluation["svm_margin"])
         evaluation["num_support_vectors"] = len(sv)
+        print("Number of support vectors: ", evaluation["num_support_vectors"])
 
         return evaluation
+
+
+    def print_metrics_box(self, kta, acc, prec, rec, f1):
+        lines = [
+            f" KTA       : {kta:.4f}",
+            f" Accuracy  : {acc:.4f}",
+            f" Precision : {prec:.4f}",
+            f" Recall    : {rec:.4f}",
+            f" F1-score  : {f1:.4f}",
+        ]
+
+        width = max(len(line) for line in lines) + 4
+        print("┌" + "─" * (width - 2) + "┐")
+        for line in lines:
+            print("│" + line.ljust(width - 2) + "│")
+        print("└" + "─" * (width - 2) + "┘")

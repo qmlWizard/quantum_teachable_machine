@@ -122,6 +122,14 @@ class AngleEmbeddingKernel:
         reps = int(np.ceil(self.num_qubits / len(x)))
         return np.tile(x, reps)[:self.num_qubits]
 
+    def _unpack_weights(self, weights):
+        structured = []
+        for row in weights:
+            w_rot = row[:self.num_qubits]                 # np.ndarray (1D)
+            w_ent = row[self.num_qubits:self.num_qubits + self.num_qubits - 1]
+            structured.append((w_rot, w_ent))
+        return structured
+
     # ----------------------------
     # Feature map
     # ----------------------------
@@ -181,19 +189,28 @@ class AngleEmbeddingKernel:
 
         # Forward
         self._feature_map(qc, x1)
+        qc.barrier()
         for r in range(self.reps):
             self._ansatz(qc, weights[r])
+            qc.barrier()
             if self.reupload:
                 self._feature_map(qc, x1)
-
+                qc.barrier()
+        
         self._ansatz_inverse(qc, weights[r])
-        self._feature_map_inverse(qc, x2)
+        qc.barrier()
+        #self._feature_map_inverse(qc, x2)
 
         # Reverse (same weights!)
         for r in reversed(range(self.reps - 1)):
             self._ansatz_inverse(qc, weights[r])
+            qc.barrier()
             if self.reupload:
                 self._feature_map_inverse(qc, x2)
+                qc.barrier()
+            elif r == 0:
+                self._feature_map_inverse(qc, x2)
+                qc.barrier()
 
         qc.measure_all()
         self._circuit = qc
@@ -216,7 +233,6 @@ class AngleEmbeddingKernel:
             return prob_0
         else:
             # measurement-based execution
-            qc.measure_all()
             backend = AerSimulator(noise_model=self.noise_model) if self.noise_model else AerSimulator()
             tqc = transpile(qc, backend, optimization_level=1)
             result = backend.run(tqc, shots=self.shots).result()
